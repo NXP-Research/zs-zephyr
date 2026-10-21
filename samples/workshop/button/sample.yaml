@@ -1,0 +1,15 @@
+sample:
+  name: Workshop Button + LED
+  description: Starter code for the workshop exercise
+common:
+  tags:
+    - workshop
+    - gpio
+  platform_allow:
+    - frdm_mcxa156
+  integration_platforms:
+    - frdm_mcxa156
+  depends_on: gpio
+  build_only: true
+tests:
+  sample.workshop.button: {}

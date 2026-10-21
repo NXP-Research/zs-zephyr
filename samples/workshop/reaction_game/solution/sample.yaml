@@ -1,0 +1,15 @@
+sample:
+  name: Workshop Reaction Game (solution)
+  description: Measure the reaction time to an LED
+common:
+  tags:
+    - workshop
+    - gpio
+  platform_allow:
+    - frdm_mcxa156
+  integration_platforms:
+    - frdm_mcxa156
+  depends_on: gpio
+  build_only: true
+tests:
+  sample.workshop.reaction_game.solution: {}

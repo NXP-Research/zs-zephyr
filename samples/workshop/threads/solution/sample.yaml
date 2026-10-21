@@ -1,0 +1,15 @@
+sample:
+  name: Workshop Threads (solution)
+  description: ISR, message queue and worker thread
+common:
+  tags:
+    - workshop
+    - gpio
+  platform_allow:
+    - frdm_mcxa156
+  integration_platforms:
+    - frdm_mcxa156
+  depends_on: gpio
+  build_only: true
+tests:
+  sample.workshop.threads.solution: {}

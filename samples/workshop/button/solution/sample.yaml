@@ -1,0 +1,15 @@
+sample:
+  name: Workshop Button + LED (solution)
+  description: Toggle an LED from a button interrupt
+common:
+  tags:
+    - workshop
+    - gpio
+  platform_allow:
+    - frdm_mcxa156
+  integration_platforms:
+    - frdm_mcxa156
+  depends_on: gpio
+  build_only: true
+tests:
+  sample.workshop.button.solution: {}

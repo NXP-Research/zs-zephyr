@@ -1,0 +1,202 @@
+/*
+ * Workshop: Reaction Game (solution)
+ *
+ * Press SW2 to start a round. After a random delay the red LED turns on;
+ * press SW2 as fast as you can. The reaction time is printed on the console.
+ *
+ * Copyright 2026 NXP
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#include <zephyr/kernel.h>
+#include <zephyr/drivers/gpio.h>
+#include <zephyr/sys/printk.h>
+
+#define MIN_DELAY_MS     1000
+#define MAX_DELAY_MS     4000
+#define REACT_TIMEOUT_MS 2000
+#define DEBOUNCE_MS      50
+
+static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
+static const struct gpio_dt_spec button = GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios);
+
+static struct gpio_callback button_cb_data;
+
+struct button_event {
+	/* Hardware cycle counter at the moment of the press. */
+	uint32_t cycles;
+};
+
+K_MSGQ_DEFINE(button_msgq, sizeof(struct button_event), 4, 4);
+
+enum game_state {
+	STATE_IDLE,    /* waiting for the player to start a round */
+	STATE_WAITING, /* LED off, random delay running */
+	STATE_REACT,   /* LED on, measuring the reaction time */
+};
+
+struct game_stats {
+	uint32_t rounds;
+	uint32_t best_us;
+	uint64_t total_us;
+};
+
+/*
+ * Small xorshift pseudo-random generator. The board has no entropy driver
+ * enabled, so we seed it with the time of the player's button presses,
+ * which is unpredictable enough for a game.
+ */
+static uint32_t rng_state = 1;
+
+static inline void rng_mix(uint32_t seed)
+{
+	rng_state ^= seed;
+	if (rng_state == 0) {
+		rng_state = 1;
+	}
+}
+
+static inline uint32_t rng_next(void)
+{
+	rng_state ^= rng_state << 13;
+	rng_state ^= rng_state >> 17;
+	rng_state ^= rng_state << 5;
+	return rng_state;
+}
+
+static void button_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
+{
+	static uint32_t last_cycles;
+	uint32_t now = k_cycle_get_32();
+
+	ARG_UNUSED(dev);
+	ARG_UNUSED(cb);
+	ARG_UNUSED(pins);
+
+	/*
+	 * Debounce right here: it's a single subtraction, cheap enough for an
+	 * ISR, and keeps bounces from ever reaching the game logic.
+	 */
+	if (k_cyc_to_ms_floor32(now - last_cycles) < DEBOUNCE_MS) {
+		return;
+	}
+	last_cycles = now;
+
+	struct button_event evt = {
+		.cycles = now,
+	};
+
+	(void)k_msgq_put(&button_msgq, &evt, K_NO_WAIT);
+}
+
+static int setup_gpio(void)
+{
+	int ret;
+
+	if (!gpio_is_ready_dt(&led) || !gpio_is_ready_dt(&button)) {
+		return -ENODEV;
+	}
+
+	ret = gpio_pin_configure_dt(&led, GPIO_OUTPUT_INACTIVE);
+	if (ret < 0) {
+		return ret;
+	}
+
+	ret = gpio_pin_configure_dt(&button, GPIO_INPUT);
+	if (ret < 0) {
+		return ret;
+	}
+
+	ret = gpio_pin_interrupt_configure_dt(&button, GPIO_INT_EDGE_TO_ACTIVE);
+	if (ret < 0) {
+		return ret;
+	}
+
+	gpio_init_callback(&button_cb_data, button_pressed, BIT(button.pin));
+	return gpio_add_callback_dt(&button, &button_cb_data);
+}
+
+static void record_result(struct game_stats *stats, uint32_t reaction_us)
+{
+	stats->rounds++;
+	stats->total_us += reaction_us;
+
+	printk("  Reaction time: %u.%03u ms\n", reaction_us / 1000, reaction_us % 1000);
+
+	if (stats->rounds == 1 || reaction_us < stats->best_us) {
+		stats->best_us = reaction_us;
+		printk("  New best!\n");
+	}
+
+	printk("  Rounds: %u, best: %u ms, average: %u ms\n", stats->rounds,
+	       stats->best_us / 1000, (uint32_t)(stats->total_us / stats->rounds / 1000));
+}
+
+int main(void)
+{
+	enum game_state state = STATE_IDLE;
+	struct game_stats stats = {0};
+	struct button_event evt;
+	uint32_t led_on_cycles = 0;
+	int ret;
+
+	ret = setup_gpio();
+	if (ret < 0) {
+		printk("Error %d: GPIO setup failed\n", ret);
+		return 0;
+	}
+
+	printk("\n=== Reaction Game ===\n");
+
+	while (1) {
+		switch (state) {
+		case STATE_IDLE:
+			printk("\nPress SW2 to start round %u\n", stats.rounds + 1);
+			k_msgq_get(&button_msgq, &evt, K_FOREVER);
+			rng_mix(evt.cycles);
+			state = STATE_WAITING;
+			break;
+
+		case STATE_WAITING: {
+			uint32_t delay_ms = MIN_DELAY_MS + rng_next() % (MAX_DELAY_MS - MIN_DELAY_MS);
+
+			printk("Get ready... press when the LED turns on!\n");
+			gpio_pin_set_dt(&led, 0);
+
+			/*
+			 * The random delay is the timeout of k_msgq_get(): if a
+			 * message arrives before it expires, the player pressed
+			 * too early.
+			 */
+			if (k_msgq_get(&button_msgq, &evt, K_MSEC(delay_ms)) == 0) {
+				printk("  Too early! Wait for the LED.\n");
+				state = STATE_IDLE;
+				break;
+			}
+
+			gpio_pin_set_dt(&led, 1);
+			led_on_cycles = k_cycle_get_32();
+			state = STATE_REACT;
+			break;
+		}
+
+		case STATE_REACT:
+			ret = k_msgq_get(&button_msgq, &evt, K_MSEC(REACT_TIMEOUT_MS));
+			gpio_pin_set_dt(&led, 0);
+
+			if (ret == 0) {
+				/* Unsigned subtraction handles counter wrap-around. */
+				record_result(&stats,
+					      k_cyc_to_us_floor32(evt.cycles - led_on_cycles));
+				rng_mix(evt.cycles);
+			} else {
+				printk("  Too slow! (more than %d ms)\n", REACT_TIMEOUT_MS);
+			}
+			state = STATE_IDLE;
+			break;
+		}
+	}
+
+	return 0;
+}
