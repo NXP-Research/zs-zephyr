@@ -36,12 +36,6 @@ enum game_state {
 	STATE_REACT,   /* LED on, measuring the reaction time */
 };
 
-struct game_stats {
-	uint32_t rounds;
-	uint32_t best_us;
-	uint64_t total_us;
-};
-
 /*
  * Small xorshift pseudo-random generator. The board has no entropy driver
  * enabled, so we seed it with the time of the player's button presses,
@@ -65,23 +59,32 @@ static inline uint32_t rng_next(void)
 	return rng_state;
 }
 
+/*
+ * Runs on every edge, press and release (GPIO_INT_EDGE_BOTH in setup_gpio()).
+ */
 static void button_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
-	static uint32_t last_cycles;
+	static uint32_t last_edge_cycles;
 	uint32_t now = k_cycle_get_32();
+	bool quiet;
 
 	ARG_UNUSED(dev);
 	ARG_UNUSED(cb);
 	ARG_UNUSED(pins);
 
 	/*
-	 * Debounce right here: it's a single subtraction, cheap enough for an
-	 * ISR, and keeps bounces from ever reaching the game logic.
+	 * Debounce right here: a subtraction and a pin read, cheap enough for
+	 * an ISR. Accept a press only if the button was quiet (no edge at all)
+	 * for DEBOUNCE_MS before it, and the pin now reads "pressed". Every
+	 * edge restarts the quiet time, also the ones we ignore. This drops
+	 * both the press bounce and the release bounce.
 	 */
-	if (k_cyc_to_ms_floor32(now - last_cycles) < DEBOUNCE_MS) {
+	quiet = k_cyc_to_ms_floor32(now - last_edge_cycles) >= DEBOUNCE_MS;
+	last_edge_cycles = now;
+
+	if (!quiet || gpio_pin_get_dt(&button) != 1) {
 		return;
 	}
-	last_cycles = now;
 
 	struct button_event evt = {
 		.cycles = now,
@@ -108,7 +111,8 @@ static int setup_gpio(void)
 		return ret;
 	}
 
-	ret = gpio_pin_interrupt_configure_dt(&button, GPIO_INT_EDGE_TO_ACTIVE);
+	/* Interrupt on both edges, so the ISR also sees the release bounce. */
+	ret = gpio_pin_interrupt_configure_dt(&button, GPIO_INT_EDGE_BOTH);
 	if (ret < 0) {
 		return ret;
 	}
@@ -117,28 +121,14 @@ static int setup_gpio(void)
 	return gpio_add_callback_dt(&button, &button_cb_data);
 }
 
-static void record_result(struct game_stats *stats, uint32_t reaction_us)
-{
-	stats->rounds++;
-	stats->total_us += reaction_us;
-
-	printk("  Reaction time: %u.%03u ms\n", reaction_us / 1000, reaction_us % 1000);
-
-	if (stats->rounds == 1 || reaction_us < stats->best_us) {
-		stats->best_us = reaction_us;
-		printk("  New best!\n");
-	}
-
-	printk("  Rounds: %u, best: %u ms, average: %u ms\n", stats->rounds,
-	       stats->best_us / 1000, (uint32_t)(stats->total_us / stats->rounds / 1000));
-}
-
 int main(void)
 {
 	enum game_state state = STATE_IDLE;
-	struct game_stats stats = {0};
 	struct button_event evt;
 	uint32_t led_on_cycles = 0;
+	uint32_t round_no = 1;
+	uint32_t best_us = UINT32_MAX;
+	uint64_t total_us = 0;
 	int ret;
 
 	ret = setup_gpio();
@@ -152,7 +142,9 @@ int main(void)
 	while (1) {
 		switch (state) {
 		case STATE_IDLE:
-			printk("\nPress SW2 to start round %u\n", stats.rounds + 1);
+			printk("\nPress SW2 to start round %u\n", round_no);
+			/* Forget presses made while the last round was printing. */
+			k_msgq_purge(&button_msgq);
 			k_msgq_get(&button_msgq, &evt, K_FOREVER);
 			rng_mix(evt.cycles);
 			state = STATE_WAITING;
@@ -163,6 +155,9 @@ int main(void)
 
 			printk("Get ready... press when the LED turns on!\n");
 			gpio_pin_set_dt(&led, 0);
+
+			/* Only presses from now on may count as "too early". */
+			k_msgq_purge(&button_msgq);
 
 			/*
 			 * The random delay is the timeout of k_msgq_get(): if a
@@ -187,8 +182,21 @@ int main(void)
 
 			if (ret == 0) {
 				/* Unsigned subtraction handles counter wrap-around. */
-				record_result(&stats,
-					      k_cyc_to_us_floor32(evt.cycles - led_on_cycles));
+				uint32_t reaction_us =
+					k_cyc_to_us_floor32(evt.cycles - led_on_cycles);
+
+				printk("  Reaction time: %u.%03u ms\n", reaction_us / 1000,
+				       reaction_us % 1000);
+
+				total_us += reaction_us;
+				if (reaction_us < best_us) {
+					best_us = reaction_us;
+					printk("  New best!\n");
+				}
+				printk("  Rounds: %u, best: %u ms, average: %u ms\n", round_no,
+				       best_us / 1000, (uint32_t)(total_us / round_no / 1000));
+
+				round_no++;
 				rng_mix(evt.cycles);
 			} else {
 				printk("  Too slow! (more than %d ms)\n", REACT_TIMEOUT_MS);

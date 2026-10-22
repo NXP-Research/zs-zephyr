@@ -69,6 +69,8 @@ static inline uint32_t rng_next(void)
 /*
  * Called by the GPIO driver when the button interrupt fires.
  * This runs in interrupt (ISR) context: keep it short and never block.
+ * It runs on every edge: press and release (GPIO_INT_EDGE_BOTH in
+ * setup_gpio()).
  */
 static void button_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
@@ -81,9 +83,11 @@ static void button_pressed(const struct device *dev, struct gpio_callback *cb, u
 	 *         struct button_event and send it with
 	 *         k_msgq_put(&button_msgq, &evt, K_NO_WAIT).
 	 *
-	 *         Debounce first: remember the last accepted press in a
-	 *         'static' variable and drop presses closer than DEBOUNCE_MS
-	 *         (k_cyc_to_ms_floor32() converts cycles to ms).
+	 *         Debounce first: remember the time of the last edge in a
+	 *         'static' variable (update it on every edge). Send the event
+	 *         only if at least DEBOUNCE_MS passed since the last edge
+	 *         (k_cyc_to_ms_floor32() converts cycles to ms) and the
+	 *         button reads pressed (gpio_pin_get_dt(&button) == 1).
 	 */
 }
 
@@ -105,7 +109,8 @@ static int setup_gpio(void)
 		return ret;
 	}
 
-	ret = gpio_pin_interrupt_configure_dt(&button, GPIO_INT_EDGE_TO_ACTIVE);
+	/* Interrupt on both edges, so the ISR also sees the release bounce. */
+	ret = gpio_pin_interrupt_configure_dt(&button, GPIO_INT_EDGE_BOTH);
 	if (ret < 0) {
 		return ret;
 	}
@@ -140,11 +145,12 @@ int main(void)
 	 *           }
 	 *   }
 	 *
-	 *   STATE_IDLE:    wait for a press (K_FOREVER), seed the RNG with
+	 *   STATE_IDLE:    empty the queue (k_msgq_purge(&button_msgq)), wait
+	 *                  for a press (K_FOREVER), seed the RNG with
 	 *                  rng_mix(), go to STATE_WAITING.
 	 *   STATE_WAITING: pick a random delay between MIN_DELAY_MS and
-	 *                  MAX_DELAY_MS with rng_next(). Wait for a press with
-	 *                  that delay as timeout:
+	 *                  MAX_DELAY_MS with rng_next(). Empty the queue
+	 *                  again. Wait for a press with that delay as timeout:
 	 *                    k_msgq_get(&button_msgq, &evt, K_MSEC(delay_ms))
 	 *                  0       -> pressed too early, back to STATE_IDLE.
 	 *                  -EAGAIN -> turn the LED on, remember the cycle
@@ -154,8 +160,11 @@ int main(void)
 	 *                  (k_cyc_to_us_floor32() of the cycle difference).
 	 *                  On timeout: LED off, print "Too slow!".
 	 *                  Back to STATE_IDLE.
-	 *
-	 * Bonus: keep statistics (rounds, best and average reaction time).
+	 */
+
+	/*
+	 * Step 3 (bonus): keep statistics (rounds, best and average reaction
+	 *                 time) and print them after each round.
 	 */
 
 	return 0;

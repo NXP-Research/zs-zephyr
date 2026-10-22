@@ -16,8 +16,6 @@ static const struct gpio_dt_spec button = GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios)
 /* Holds the callback registration with the GPIO driver. Must stay in memory. */
 static struct gpio_callback button_cb_data;
 
-static uint32_t press_count;
-
 /*
  * Called by the GPIO driver when the button interrupt fires.
  * This runs in interrupt (ISR) context: keep it short and never block.
@@ -26,6 +24,9 @@ static uint32_t press_count;
  */
 static void button_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
+	/* 'static' keeps the value between calls. It starts at 0. */
+	static uint32_t press_count;
+
 	ARG_UNUSED(dev);
 	ARG_UNUSED(cb);
 	ARG_UNUSED(pins);
@@ -34,8 +35,7 @@ static void button_pressed(const struct device *dev, struct gpio_callback *cb, u
 	press_count++;
 
 	/* printk() is fine for learning, but slow inside an ISR. */
-	printk("Button pressed %u times (in ISR: %s)\n", press_count,
-	       k_is_in_isr() ? "yes" : "no");
+	printk("Button pressed %u times\n", press_count);
 }
 
 int main(void)

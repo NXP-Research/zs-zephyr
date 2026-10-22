@@ -22,7 +22,7 @@
 #define HEARTBEAT_PRIORITY 7
 #define STACK_SIZE         1024
 
-/* Presses closer together than this are treated as contact bounce. */
+/* Edges closer together than this are treated as contact bounce. */
 #define DEBOUNCE_MS 50
 
 /* Red LED (led0) and button SW2 (sw0), from the board Devicetree. */
@@ -37,6 +37,7 @@ static struct gpio_callback button_cb_data;
  *
  *           struct button_event {
  *                   uint32_t timestamp_ms;
+ *                   bool pressed;
  *           };
  *
  *           K_MSGQ_DEFINE(button_msgq, sizeof(struct button_event), 8, 4);
@@ -47,6 +48,7 @@ static struct gpio_callback button_cb_data;
 /*
  * Called by the GPIO driver when the button interrupt fires.
  * This runs in interrupt (ISR) context: keep it short and never block.
+ * It runs on every edge: press and release (GPIO_INT_EDGE_BOTH in main()).
  */
 static void button_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
@@ -56,8 +58,9 @@ static void button_pressed(const struct device *dev, struct gpio_callback *cb, u
 
 	/*
 	 * Step 2: Only record the event: fill a struct button_event with
-	 *         k_uptime_get_32() and send it with
-	 *         k_msgq_put(&button_msgq, &evt, K_NO_WAIT).
+	 *         k_uptime_get_32() and with the button level
+	 *         (gpio_pin_get_dt(&button) == 1 means pressed), and send it
+	 *         with k_msgq_put(&button_msgq, &evt, K_NO_WAIT).
 	 *
 	 *         Why K_NO_WAIT? What happens if the queue is full?
 	 */
@@ -65,14 +68,15 @@ static void button_pressed(const struct device *dev, struct gpio_callback *cb, u
 
 /*
  * Step 3: Write a worker thread. It waits for events with
- *         k_msgq_get(&button_msgq, &evt, K_FOREVER), then toggles the red
- *         LED (led) and prints the timestamp. A thread entry function has
- *         this signature:
+ *         k_msgq_get(&button_msgq, &evt, K_FOREVER), skips releases
+ *         (evt.pressed is false), then toggles the red LED (led) and
+ *         prints the timestamp. A thread entry function has this
+ *         signature:
  *
  *           static void worker_thread(void *p1, void *p2, void *p3)
  *
- *         Bonus: ignore events that arrive less than DEBOUNCE_MS after the
- *         previous accepted one (contact bounce).
+ *         Bonus (step 6): ignore presses that come less than DEBOUNCE_MS
+ *         after the previous edge (contact bounce).
  */
 
 /*
@@ -111,7 +115,8 @@ int main(void)
 		return 0;
 	}
 
-	ret = gpio_pin_interrupt_configure_dt(&button, GPIO_INT_EDGE_TO_ACTIVE);
+	/* Interrupt on both edges, press and release, to see the bounce. */
+	ret = gpio_pin_interrupt_configure_dt(&button, GPIO_INT_EDGE_BOTH);
 	if (ret < 0) {
 		printk("Error %d: failed to configure button interrupt\n", ret);
 		return 0;
