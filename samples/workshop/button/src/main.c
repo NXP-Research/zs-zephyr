@@ -22,8 +22,11 @@
  *           GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios)
  *           GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios)
  *
- *         You also need a 'static struct gpio_callback' variable. The GPIO
- *         driver keeps a pointer to it, so it must stay in memory.
+ *         You also need a callback structure:
+ *
+ *           static struct gpio_callback button_cb_data;
+ *
+ *         The GPIO driver keeps a pointer to it, so it must stay in memory.
  */
 
 /*
@@ -51,8 +54,8 @@ int main(void)
 	 *         gpio_pin_interrupt_configure_dt() with GPIO_INT_EDGE_TO_ACTIVE.
 	 *
 	 * Step 6: Bind your callback to the button pin and register it:
-	 *         gpio_init_callback(&cb_data, button_pressed, BIT(button.pin));
-	 *         gpio_add_callback_dt(&button, &cb_data);
+	 *         gpio_init_callback(&button_cb_data, button_pressed, BIT(button.pin));
+	 *         gpio_add_callback_dt(&button, &button_cb_data);
 	 *
 	 * Most of these functions return a negative error code on failure.
 	 * Check it and print an error message.
